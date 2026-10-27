@@ -1,20 +1,19 @@
-name: Build ATLAS Futurica v0.2 APK
+name: Build ATLAS Android APK
 
-on:
+'on':
   workflow_dispatch:
   push:
     branches:
       - main
     paths:
       - 'ATLAS_Futurica_v0.2_Source.zip'
-      - '.github/workflows/android-debug-apk.yml'
+      - '.github/workflows/build-atlas-apk.yml'
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Android debug APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -22,53 +21,88 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract v0.2 source
-        run: |
-          set -euo pipefail
-          test -s ATLAS_Futurica_v0.2_Source.zip
-          mkdir -p _atlas_source
-          unzip -q ATLAS_Futurica_v0.2_Source.zip -d _atlas_source
-          test -f _atlas_source/ATLAS_Futurica_Android_Project/settings.gradle
-          echo "ATLAS source extracted successfully."
-
-      - name: Set up Java 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          packages: 'platform-tools'
 
-      - name: Install Android SDK packages
-        run: |
-          sdkmanager "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "ndk;27.2.12479018"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Build debug APK
-        working-directory: _atlas_source/ATLAS_Futurica_Android_Project
-        run: gradle --no-daemon --stacktrace assembleDebug
-
-      - name: Verify APK
+      - name: Check Android SDK
+        shell: bash
         run: |
           set -euo pipefail
-          APK="_atlas_source/ATLAS_Futurica_Android_Project/app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
+          sdkmanager --list_installed
+          adb version
+
+      - name: Extract Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="ATLAS_Futurica_v0.2_Source.zip"
+
+          if [ ! -s "$ZIP_FILE" ]; then
+            echo "ERROR: Android source ZIP not found."
+            echo "Files in repository:"
+            ls -la
+            exit 1
+          fi
+
+          mkdir -p extracted
+          unzip -oq "$ZIP_FILE" -d extracted
+
+          PROJECT_DIR="$(find extracted -type f \( \
+            -name settings.gradle \
+            -o -name settings.gradle.kts \
+          \) -printf '%h\n' -quit)"
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: No Gradle Android project found in ZIP."
+            find extracted -maxdepth 4 -type f | head -100
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Found project: $PROJECT_DIR"
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --no-daemon assembleDebug --stacktrace
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find "$PROJECT_DIR" -type f \
+            -path '*/build/outputs/apk/debug/*.apk' \
+            -print -quit)"
+
+          if [ -z "$APK" ] || [ ! -s "$APK" ]; then
+            echo "ERROR: No debug APK was generated."
+            exit 1
+          fi
+
+          echo "APK generated: $APK"
           sha256sum "$APK"
 
-      - name: Upload debug APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ATLAS-Futurica-v0.2-debug-APK
-          path: _atlas_source/ATLAS_Futurica_Android_Project/app/build/outputs/apk/debug/app-debug.apk
+          name: ATLAS-Futurica-debug-APK
+          path: extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
